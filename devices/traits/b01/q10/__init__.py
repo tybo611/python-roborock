@@ -13,7 +13,7 @@ from roborock.roborock_message import RoborockMessage
 from .child_lock import Q10ChildLockTrait
 from .command import Q10CommandTrait
 from .consumable import Q10ConsumableTrait
-from .dnd import Q10DNDTrait
+from .do_not_disturb import Q10DNDTrait
 from .status import Q10StatusTrait
 from .volume import Q10VolumeTrait
 
