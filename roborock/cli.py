@@ -41,8 +41,8 @@ from pyshark import FileCapture  # type: ignore
 from pyshark.capture.live_capture import LiveCapture, UnknownInterfaceException  # type: ignore
 from pyshark.packet.packet import Packet  # type: ignore
 
-from roborock import RoborockCommand
-from roborock.data import RoborockBase, UserData
+from roborock import SHORT_MODEL_TO_ENUM, RoborockCommand
+from roborock.data import DeviceData, RoborockBase, UserData
 from roborock.data.b01_q10.b01_q10_code_mappings import B01_Q10_DP
 from roborock.device_features import DeviceFeatures
 from roborock.devices.cache import Cache, CacheData
@@ -54,6 +54,7 @@ from roborock.devices.traits.v1.consumeable import ConsumableAttribute
 from roborock.devices.traits.v1.map_content import MapContentTrait
 from roborock.exceptions import RoborockException, RoborockUnsupportedFeature
 from roborock.protocol import MessageParser
+from roborock.version_1_apis.roborock_mqtt_client_v1 import RoborockMqttClientV1
 from roborock.web_api import RoborockApiClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -93,12 +94,11 @@ def async_command(func):
         async def run():
             try:
                 await func(*args, **kwargs)
-            except Exception as err:
+            except Exception:
                 _LOGGER.exception("Uncaught exception in command")
-                click.echo(f"Error: {err}", err=True)
+                click.echo(f"Error: {sys.exc_info()[1]}", err=True)
             finally:
-                if not context.is_session_mode():
-                    await context.cleanup()
+                await context.cleanup()
 
         if context.is_session_mode():
             # Session mode - run in the persistent loop
@@ -746,19 +746,14 @@ async def network_info(ctx, device_id: str):
     await _display_v1_trait(context, device_id, lambda v1: v1.network_info)
 
 
-def _parse_b01_q10_command(cmd: str) -> B01_Q10_DP:
+def _parse_b01_q10_command(cmd: str) -> B01_Q10_DP | None:
     """Parse B01_Q10 command from either enum name or value."""
-    try:
-        return B01_Q10_DP(int(cmd))
-    except ValueError:
+    for func in (B01_Q10_DP.from_code, B01_Q10_DP.from_name, B01_Q10_DP.from_value):
         try:
-            return B01_Q10_DP.from_name(cmd)
+            return func(cmd)
         except ValueError:
-            try:
-                return B01_Q10_DP.from_value(cmd)
-            except ValueError:
-                pass
-    raise RoborockException(f"Invalid command {cmd} for B01_Q10 device")
+            continue
+    return None
 
 
 @click.command()
@@ -773,16 +768,18 @@ async def command(ctx, cmd, device_id, params):
     device = await device_manager.get_device(device_id)
     if device.v1_properties is not None:
         command_trait: Trait = device.v1_properties.command
-        result = await command_trait.send(cmd, json.loads(params) if params is not None else None)
+        result = await command_trait.send(cmd, json.loads(params) if params is not None else {})
         if result:
             click.echo(dump_json(result))
     elif device.b01_q10_properties is not None:
-        cmd_value = _parse_b01_q10_command(cmd)
-        command_trait: Trait = device.b01_q10_properties.command
-        await command_trait.send(cmd_value, json.loads(params) if params is not None else None)
-        click.echo("Command sent successfully; Enable debug logging (-d) to see responses.")
-        # Q10 commands don't have a specific time to respond, so wait a bit and log
+        # Parse B01_Q10_DP from either enum name or the value
+        if (cmd_value := _parse_b01_q10_command(cmd)) is None:
+            raise RoborockException(f"Invalid command {cmd} for B01_Q10 device")
+        await device.b01_q10_properties.send(cmd_value, json.loads(params) if params is not None else {})
+        # Q10 commands don't have a specific time to respond, so wait a bit
         await asyncio.sleep(5)
+    else:
+        raise RoborockException(f"Device {device.name} does not support sending raw commands")
 
 
 @click.command()
@@ -843,46 +840,44 @@ async def get_device_info(ctx: click.Context):
     """
     click.echo("Discovering devices...")
     context: RoborockContext = ctx.obj
-    device_connection_manager = await context.get_device_manager()
-    device_manager = await device_connection_manager.ensure_device_manager()
-    devices = await device_manager.get_devices()
-    if not devices:
+    connection_cache = await context.get_devices()
+
+    home_data = connection_cache.cache_data.home_data
+
+    all_devices = home_data.get_all_devices()
+    if not all_devices:
         click.echo("No devices found.")
         return
 
-    click.echo(f"Found {len(devices)} devices. Fetching data...")
+    click.echo(f"Found {len(all_devices)} devices. Fetching data...")
 
     all_products_data = {}
 
-    for device in devices:
+    for device in all_devices:
         click.echo(f"  - Processing {device.name} ({device.duid})")
+        product_info = home_data.product_map[device.product_id]
+        device_data = DeviceData(device, product_info.model)
+        mqtt_client = RoborockMqttClientV1(connection_cache.user_data, device_data)
 
-        if device.product.model in all_products_data:
-            click.echo(f"    - Skipping duplicate model {device.product.model}")
-            continue
-
-        current_product_data = {
-            "Protocol Version": device.device_info.pv,
-            "Product Nickname": device.product.product_nickname.name,
-        }
-        if device.v1_properties is not None:
-            try:
-                result: list[dict[str, Any]] = await device.v1_properties.command.send(
-                    RoborockCommand.APP_GET_INIT_STATUS
-                )
-            except Exception as e:
-                click.echo(f"    - Error processing device {device.name}: {e}", err=True)
-                continue
-            init_status_result = result[0] if result else {}
-            current_product_data.update(
-                {
-                    "New Feature Info": init_status_result.get("new_feature_info"),
-                    "New Feature Info Str": init_status_result.get("new_feature_info_str"),
-                    "Feature Info": init_status_result.get("feature_info"),
-                }
+        try:
+            init_status_result = await mqtt_client.send_command(
+                RoborockCommand.APP_GET_INIT_STATUS,
             )
+            product_nickname = SHORT_MODEL_TO_ENUM.get(product_info.model.split(".")[-1]).name
+            current_product_data = {
+                "Protocol Version": device.pv,
+                "Product Nickname": product_nickname,
+                "New Feature Info": init_status_result.get("new_feature_info"),
+                "New Feature Info Str": init_status_result.get("new_feature_info_str"),
+                "Feature Info": init_status_result.get("feature_info"),
+            }
 
-        all_products_data[device.product.model] = current_product_data
+            all_products_data[product_info.model] = current_product_data
+
+        except Exception as e:
+            click.echo(f"    - Error processing device {device.name}: {e}", err=True)
+        finally:
+            await mqtt_client.async_release()
 
     if all_products_data:
         click.echo("\n--- Device Information (copy to your YAML file) ---\n")

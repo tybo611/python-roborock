@@ -1,30 +1,12 @@
-"""Create traits for A01 devices.
-
-This module provides the API implementations for A01 protocol devices, which include
-Dyad (Wet/Dry Vacuums) and Zeo (Washing Machines).
-
-Using A01 APIs
---------------
-A01 devices expose a single API object that handles all device interactions. This API is
-available on the device instance (typically via `device.a01_properties`).
-
-The API provides two main methods:
-1.  **query_values(protocols)**: Fetches current state for specific data points.
-    You must pass a list of protocol enums (e.g. `RoborockDyadDataProtocol` or
-    `RoborockZeoProtocol`) to request specific data.
-2.  **set_value(protocol, value)**: Sends a command to the device to change a setting
-    or perform an action.
-
-Note that these APIs fetch data directly from the device upon request and do not
-cache state internally.
-"""
-
-import json
+import logging
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from datetime import time
 from typing import Any
 
-from roborock.data import DyadProductInfo, DyadSndState, HomeDataProduct, RoborockCategory
+from roborock import DeviceData
+from roborock.api import RoborockClient
+from roborock.data import DyadProductInfo, DyadSndState, RoborockCategory
 from roborock.data.dyad.dyad_code_mappings import (
     DyadBrushSpeed,
     DyadCleanMode,
@@ -48,15 +30,16 @@ from roborock.data.zeo.zeo_code_mappings import (
     ZeoState,
     ZeoTemperature,
 )
-from roborock.devices.a01_channel import send_decoded_command
-from roborock.devices.mqtt_channel import MqttChannel
-from roborock.devices.traits import Trait
-from roborock.roborock_message import RoborockDyadDataProtocol, RoborockZeoProtocol
+from roborock.exceptions import RoborockException
+from roborock.protocols.a01_protocol import decode_rpc_response
+from roborock.roborock_message import (
+    RoborockDyadDataProtocol,
+    RoborockMessage,
+    RoborockMessageProtocol,
+    RoborockZeoProtocol,
+)
 
-__init__ = [
-    "DyadApi",
-    "ZeoApi",
-]
+_LOGGER = logging.getLogger(__name__)
 
 
 DYAD_PROTOCOL_ENTRIES: dict[RoborockDyadDataProtocol, Callable] = {
@@ -93,7 +76,7 @@ DYAD_PROTOCOL_ENTRIES: dict[RoborockDyadDataProtocol, Callable] = {
 }
 
 ZEO_PROTOCOL_ENTRIES: dict[RoborockZeoProtocol, Callable] = {
-    # read-only
+    # ro
     RoborockZeoProtocol.STATE: lambda val: ZeoState(val).name,
     RoborockZeoProtocol.COUNTDOWN: lambda val: int(val),
     RoborockZeoProtocol.WASHING_LEFT: lambda val: int(val),
@@ -101,7 +84,7 @@ ZEO_PROTOCOL_ENTRIES: dict[RoborockZeoProtocol, Callable] = {
     RoborockZeoProtocol.TIMES_AFTER_CLEAN: lambda val: int(val),
     RoborockZeoProtocol.DETERGENT_EMPTY: lambda val: bool(val),
     RoborockZeoProtocol.SOFTENER_EMPTY: lambda val: bool(val),
-    # read-write
+    # rw
     RoborockZeoProtocol.MODE: lambda val: ZeoMode(val).name,
     RoborockZeoProtocol.PROGRAM: lambda val: ZeoProgram(val).name,
     RoborockZeoProtocol.TEMP: lambda val: ZeoTemperature(val).name,
@@ -114,78 +97,65 @@ ZEO_PROTOCOL_ENTRIES: dict[RoborockZeoProtocol, Callable] = {
 }
 
 
-def convert_dyad_value(protocol_value: RoborockDyadDataProtocol, value: Any) -> Any:
+def convert_dyad_value(protocol: int, value: Any) -> Any:
     """Convert a dyad protocol value to its corresponding type."""
+    protocol_value = RoborockDyadDataProtocol(protocol)
     if (converter := DYAD_PROTOCOL_ENTRIES.get(protocol_value)) is not None:
-        try:
-            return converter(value)
-        except (ValueError, TypeError):
-            return None
+        return converter(value)
     return None
 
 
-def convert_zeo_value(protocol_value: RoborockZeoProtocol, value: Any) -> Any:
+def convert_zeo_value(protocol: int, value: Any) -> Any:
     """Convert a zeo protocol value to its corresponding type."""
+    protocol_value = RoborockZeoProtocol(protocol)
     if (converter := ZEO_PROTOCOL_ENTRIES.get(protocol_value)) is not None:
-        try:
-            return converter(value)
-        except (ValueError, TypeError):
-            return None
+        return converter(value)
     return None
 
 
-class DyadApi(Trait):
-    """API for interacting with Dyad devices."""
+class RoborockClientA01(RoborockClient, ABC):
+    """Roborock client base class for A01 devices."""
 
-    def __init__(self, channel: MqttChannel) -> None:
-        """Initialize the Dyad API."""
-        self._channel = channel
+    value_converter: Callable[[int, Any], Any] | None = None
 
-    async def query_values(self, protocols: list[RoborockDyadDataProtocol]) -> dict[RoborockDyadDataProtocol, Any]:
-        """Query the device for the values of the given Dyad protocols."""
-        response = await send_decoded_command(
-            self._channel,
-            {RoborockDyadDataProtocol.ID_QUERY: protocols},
-            value_encoder=json.dumps,
-        )
-        return {protocol: convert_dyad_value(protocol, response.get(protocol)) for protocol in protocols}
+    def __init__(self, device_info: DeviceData, category: RoborockCategory):
+        """Initialize the Roborock client."""
+        super().__init__(device_info)
+        if category == RoborockCategory.WET_DRY_VAC:
+            self.value_converter = convert_dyad_value
+        elif category == RoborockCategory.WASHING_MACHINE:
+            self.value_converter = convert_zeo_value
+        else:
+            _LOGGER.debug("Device category %s is not (yet) supported", category)
+            self.value_converter = None
 
-    async def set_value(self, protocol: RoborockDyadDataProtocol, value: Any) -> dict[RoborockDyadDataProtocol, Any]:
-        """Set a value for a specific protocol on the device."""
-        params = {protocol: value}
-        return await send_decoded_command(self._channel, params)
+    def on_message_received(self, messages: list[RoborockMessage]) -> None:
+        if self.value_converter is None:
+            return
+        for message in messages:
+            protocol = message.protocol
+            if message.payload and protocol in [
+                RoborockMessageProtocol.RPC_RESPONSE,
+                RoborockMessageProtocol.GENERAL_REQUEST,
+            ]:
+                try:
+                    data_points = decode_rpc_response(message)
+                except RoborockException as err:
+                    self._logger.debug("Failed to decode message: %s", err)
+                    continue
+                for data_point_number, data_point in data_points.items():
+                    self._logger.debug("received msg with dps, protocol: %s, %s", data_point_number, protocol)
+                    if (converted_response := self.value_converter(data_point_number, data_point)) is not None:
+                        queue = self._waiting_queue.get(int(data_point_number))
+                        if queue and queue.protocol == protocol:
+                            queue.set_result(converted_response)
+                    else:
+                        self._logger.debug(
+                            "Received unknown data point %s for protocol %s, ignoring", data_point_number, protocol
+                        )
 
-
-class ZeoApi(Trait):
-    """API for interacting with Zeo devices."""
-
-    name = "zeo"
-
-    def __init__(self, channel: MqttChannel) -> None:
-        """Initialize the Zeo API."""
-        self._channel = channel
-
-    async def query_values(self, protocols: list[RoborockZeoProtocol]) -> dict[RoborockZeoProtocol, Any]:
-        """Query the device for the values of the given protocols."""
-        response = await send_decoded_command(
-            self._channel,
-            {RoborockZeoProtocol.ID_QUERY: protocols},
-            value_encoder=json.dumps,
-        )
-        return {protocol: convert_zeo_value(protocol, response.get(protocol)) for protocol in protocols}
-
-    async def set_value(self, protocol: RoborockZeoProtocol, value: Any) -> dict[RoborockZeoProtocol, Any]:
-        """Set a value for a specific protocol on the device."""
-        params = {protocol: value}
-        return await send_decoded_command(self._channel, params, value_encoder=lambda x: x)
-
-
-def create(product: HomeDataProduct, mqtt_channel: MqttChannel) -> DyadApi | ZeoApi:
-    """Create traits for A01 devices."""
-    match product.category:
-        case RoborockCategory.WET_DRY_VAC:
-            return DyadApi(mqtt_channel)
-        case RoborockCategory.WASHING_MACHINE:
-            return ZeoApi(mqtt_channel)
-        case _:
-            raise NotImplementedError(f"Unsupported category {product.category}")
+    @abstractmethod
+    async def update_values(
+        self, dyad_data_protocols: list[RoborockDyadDataProtocol | RoborockZeoProtocol]
+    ) -> dict[RoborockDyadDataProtocol | RoborockZeoProtocol, Any]:
+        """This should handle updating for each given protocol."""

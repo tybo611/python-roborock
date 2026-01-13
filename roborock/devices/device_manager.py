@@ -16,7 +16,7 @@ from roborock.data import (
     UserData,
 )
 from roborock.devices.device import DeviceReadyCallback, RoborockDevice
-from roborock.diagnostics import Diagnostics, redact_device_data
+from roborock.diagnostics import Diagnostics
 from roborock.exceptions import RoborockException
 from roborock.map.map_parser import MapParserConfig
 from roborock.mqtt.roborock_session import create_lazy_mqtt_session
@@ -25,10 +25,10 @@ from roborock.protocol import create_mqtt_params
 from roborock.web_api import RoborockApiClient, UserWebApiClient
 
 from .cache import Cache, DeviceCache, NoCache
-from .rpc.v1_channel import create_v1_channel
+from .channel import Channel
+from .mqtt_channel import create_mqtt_channel
 from .traits import Trait, a01, b01, v1
-from .transport.channel import Channel
-from .transport.mqtt_channel import create_mqtt_channel
+from .v1_channel import create_v1_channel
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -76,7 +76,6 @@ class DeviceManager:
         self._devices: dict[str, RoborockDevice] = {}
         self._mqtt_session = mqtt_session
         self._diagnostics = diagnostics
-        self._home_data: HomeData | None = None
 
     async def discover_devices(self, prefer_cache: bool = True) -> list[RoborockDevice]:
         """Discover all devices for the logged-in user."""
@@ -92,9 +91,9 @@ class DeviceManager:
                     raise
                 _LOGGER.debug("Failed to fetch home data, using cached data: %s", ex)
             await self._cache.set(cache_data)
-        self._home_data = cache_data.home_data
+        home_data = cache_data.home_data
 
-        device_products = self._home_data.device_products
+        device_products = home_data.device_products
         _LOGGER.debug("Discovered %d devices", len(device_products))
 
         # These are connected serially to avoid overwhelming the MQTT broker
@@ -107,7 +106,7 @@ class DeviceManager:
             if duid in self._devices:
                 continue
             try:
-                new_device = self._device_creator(self._home_data, device, product)
+                new_device = self._device_creator(home_data, device, product)
             except UnsupportedDeviceError:
                 _LOGGER.info("Skipping unsupported device %s %s", product.summary_info(), device.summary_info())
                 unsupported_devices_counter.increment(device.pv or "unknown")
@@ -137,11 +136,7 @@ class DeviceManager:
 
     def diagnostic_data(self) -> Mapping[str, Any]:
         """Return diagnostics information about the device manager."""
-        return {
-            "home_data": redact_device_data(self._home_data.as_dict()) if self._home_data else None,
-            "devices": [device.diagnostic_data() for device in self._devices.values()],
-            "diagnostics": self._diagnostics.as_dict(),
-        }
+        return self._diagnostics.as_dict()
 
 
 @dataclass
@@ -191,7 +186,6 @@ async def create_device_manager(
     session: aiohttp.ClientSession | None = None,
     ready_callback: DeviceReadyCallback | None = None,
     mqtt_session_unauthorized_hook: SessionUnauthorizedHook | None = None,
-    prefer_cache: bool = True,
 ) -> DeviceManager:
     """Convenience function to create and initialize a DeviceManager.
 
@@ -204,7 +198,6 @@ async def create_device_manager(
         mqtt_session_unauthorized_hook: Optional hook for MQTT session unauthorized
           events which may indicate rate limiting or revoked credentials. The
           caller may use this to refresh authentication tokens as needed.
-        prefer_cache: Whether to prefer cached device data over always fetching it from the API.
 
     Returns:
         An initialized DeviceManager with discovered devices.
@@ -264,5 +257,5 @@ async def create_device_manager(
         return dev
 
     manager = DeviceManager(web_api, device_creator, mqtt_session=mqtt_session, cache=cache, diagnostics=diagnostics)
-    await manager.discover_devices(prefer_cache)
+    await manager.discover_devices()
     return manager

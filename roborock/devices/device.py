@@ -18,9 +18,9 @@ from roborock.exceptions import RoborockException
 from roborock.roborock_message import RoborockMessage
 from roborock.util import RoborockLoggerAdapter
 
+from .channel import Channel
 from .traits import Trait
 from .traits.traits_mixin import TraitsMixin
-from .transport.channel import Channel
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,9 +33,7 @@ __all__ = [
 MIN_BACKOFF_INTERVAL = datetime.timedelta(seconds=10)
 MAX_BACKOFF_INTERVAL = datetime.timedelta(minutes=30)
 BACKOFF_MULTIPLIER = 1.5
-# Give time for the NETWORK_INFO fetch and V1 hello attempt
-# and potential fallback to L01.
-START_ATTEMPT_TIMEOUT = datetime.timedelta(seconds=15)
+START_ATTEMPT_TIMEOUT = datetime.timedelta(seconds=5)
 
 
 DeviceReadyCallback = Callable[["RoborockDevice"], None]
@@ -197,12 +195,14 @@ class RoborockDevice(ABC, TraitsMixin):
         if self._unsub:
             raise ValueError("Already connected to the device")
         unsub = await self._channel.subscribe(self._on_message)
-        if self.v1_properties is not None:
-            try:
+        try:
+            if self.v1_properties is not None:
                 await self.v1_properties.discover_features()
-            except RoborockException:
-                unsub()
-                raise
+            elif self.b01_q10_properties is not None:
+                await self.b01_q10_properties.start()
+        except RoborockException:
+            unsub()
+            raise
         self._logger.info("Connected to device")
         self._unsub = unsub
 
@@ -214,6 +214,8 @@ class RoborockDevice(ABC, TraitsMixin):
                 await self._connect_task
             except asyncio.CancelledError:
                 pass
+        if self.b01_q10_properties is not None:
+            await self.b01_q10_properties.close()
         if self._unsub:
             self._unsub()
             self._unsub = None
@@ -226,11 +228,9 @@ class RoborockDevice(ABC, TraitsMixin):
         """Return diagnostics information about the device."""
         extra: dict[str, Any] = {}
         if self.v1_properties:
-            extra["traits"] = self.v1_properties.as_dict()
-        return redact_device_data(
-            {
-                "device": self.device_info.as_dict(),
-                "product": self.product.as_dict(),
-                **extra,
-            }
-        )
+            extra["traits"] = redact_device_data(self.v1_properties.as_dict())
+        return {
+            "device": redact_device_data(self.device_info.as_dict()),
+            "product": redact_device_data(self.product.as_dict()),
+            **extra,
+        }

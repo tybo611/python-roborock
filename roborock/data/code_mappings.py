@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from collections import namedtuple
 from enum import Enum, IntEnum, StrEnum
-from typing import Self
 
 _LOGGER = logging.getLogger(__name__)
 completed_warnings = set()
@@ -56,9 +55,8 @@ class RoborockModeEnum(StrEnum):
     """A custom StrEnum that also stores an integer code for each member."""
 
     code: int
-    """The integer code associated with the enum member."""
 
-    def __new__(cls, value: str, code: int) -> Self:
+    def __new__(cls, value: str, code: int) -> RoborockModeEnum:
         """Creates a new enum member."""
         member = str.__new__(cls, value)
         member._value_ = value
@@ -66,38 +64,28 @@ class RoborockModeEnum(StrEnum):
         return member
 
     @classmethod
-    def from_code(cls, code: int) -> Self:
+    def from_code(cls, code: int):
+        """Find enum member by code."""
         for member in cls:
             if member.code == code:
                 return member
-        message = f"{code} is not a valid code for {cls.__name__}"
-        if message not in completed_warnings:
-            completed_warnings.add(message)
-            _LOGGER.warning(message)
-        raise ValueError(message)
+        raise ValueError(f"{code} is not a valid code for {cls.__name__}")
 
     @classmethod
-    def from_code_optional(cls, code: int) -> RoborockModeEnum | None:
-        try:
-            return cls.from_code(code)
-        except ValueError:
-            return None
-
-    @classmethod
-    def from_value(cls, value: str) -> Self:
-        """Find enum member by string value (case-insensitive)."""
-        for member in cls:
-            if member.value.lower() == value.lower():
-                return member
-        raise ValueError(f"{value} is not a valid value for {cls.__name__}")
-
-    @classmethod
-    def from_name(cls, name: str) -> Self:
+    def from_name(cls, name: str):
         """Find enum member by name (case-insensitive)."""
         for member in cls:
             if member.name.lower() == name.lower():
                 return member
         raise ValueError(f"{name} is not a valid name for {cls.__name__}")
+
+    @classmethod
+    def from_value(cls, value: str):
+        """Find enum member by value (case-insensitive)."""
+        for member in cls:
+            if member.value.lower() == value.lower():
+                return member
+        raise ValueError(f"{value} is not a valid value for {cls.__name__}")
 
     @classmethod
     def keys(cls) -> list[str]:

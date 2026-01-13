@@ -1,7 +1,6 @@
 import datetime
 import logging
-from dataclasses import dataclass, field
-from enum import StrEnum
+from dataclasses import dataclass
 from typing import Any
 
 from roborock.const import (
@@ -92,39 +91,12 @@ from .v1_code_mappings import (
 _LOGGER = logging.getLogger(__name__)
 
 
-class FieldNameBase(StrEnum):
-    """A base enum class that represents a field name in a RoborockBase dataclass."""
-
-
-class StatusField(FieldNameBase):
-    """An enum that represents a field in the `Status` class.
-
-    This is used with `roborock.devices.traits.v1.status.DeviceFeaturesTrait`
-    to understand if a feature is supported by the device using `is_field_supported`.
-
-    The enum values are names of fields in the `Status` class. Each field is
-    annotated with `requires_schema_code` metadata to map the field to a schema
-    code in the product schema, which may have a different name than the field/attribute name.
-    """
-
-    STATE = "state"
-    BATTERY = "battery"
-    FAN_POWER = "fan_power"
-    WATER_BOX_MODE = "water_box_mode"
-    CHARGE_STATUS = "charge_status"
-    DRY_STATUS = "dry_status"
-
-
-def _requires_schema_code(requires_schema_code: str, default=None) -> Any:
-    return field(metadata={"requires_schema_code": requires_schema_code}, default=default)
-
-
 @dataclass
 class Status(RoborockBase):
     msg_ver: int | None = None
     msg_seq: int | None = None
-    state: RoborockStateCode | None = _requires_schema_code("state", default=None)
-    battery: int | None = _requires_schema_code("battery", default=None)
+    state: RoborockStateCode | None = None
+    battery: int | None = None
     clean_time: int | None = None
     clean_area: int | None = None
     error_code: RoborockErrorCode | None = None
@@ -137,12 +109,12 @@ class Status(RoborockBase):
     back_type: int | None = None
     wash_phase: int | None = None
     wash_ready: int | None = None
-    fan_power: RoborockFanPowerCode | None = _requires_schema_code("fan_power", default=None)
+    fan_power: RoborockFanPowerCode | None = None
     dnd_enabled: int | None = None
     map_status: int | None = None
     is_locating: int | None = None
     lock_status: int | None = None
-    water_box_mode: RoborockMopIntensityCode | None = _requires_schema_code("water_box_mode", default=None)
+    water_box_mode: RoborockMopIntensityCode | None = None
     water_box_carriage_status: int | None = None
     mop_forbidden_enable: int | None = None
     camera_status: int | None = None
@@ -160,13 +132,13 @@ class Status(RoborockBase):
     collision_avoid_status: int | None = None
     switch_map_mode: int | None = None
     dock_error_status: RoborockDockErrorCode | None = None
-    charge_status: int | None = _requires_schema_code("charge_status", default=None)
+    charge_status: int | None = None
     unsave_map_reason: int | None = None
     unsave_map_flag: int | None = None
     wash_status: int | None = None
     distance_off: int | None = None
     in_warmup: int | None = None
-    dry_status: int | None = _requires_schema_code("drying_status", default=None)
+    dry_status: int | None = None
     rdt: int | None = None
     clean_percent: int | None = None
     rss: int | None = None
